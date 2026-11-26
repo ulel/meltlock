@@ -47,6 +47,7 @@ overrides the file (one name pins it).
 | `Mod+Escape` | bound in `~/.config/sway/config` |
 | `Mod+d`, "Lock Screen" | desktop entry |
 | `meltlock` | from a terminal |
+| `meltlock --ready-fd FD [OPTION..]` | from a program that supervises the locker, such as [screensaver-bridge](https://github.com/oscarh/screensaver-bridge); options go on to swaylock, which then stays in the foreground |
 | `meltlock preview [DIR]` | render the pictures without locking |
 | `meltlock frames DIR [SECONDS..]` | render every effect at those times, without locking |
 | `timeout 5 meltlock bg sand overlay` | watch an effect live for 5 s |

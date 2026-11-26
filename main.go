@@ -27,9 +27,12 @@ import (
 	"time"
 )
 
-const usage = `usage: meltlock [command]
+const usage = `usage: meltlock [command | LOCKER-OPTION...]
 
   (none)            lock the screen
+  LOCKER-OPTION...  lock the screen, passing the options on to swaylock or
+                    swaylock-plugin. With --ready-fd (-R) the locker stays
+                    in the foreground, for a caller that supervises it
   preview [DIR]     write the still pictures without locking
   frames DIR [S..]  write every effect at the given seconds
   bg [EFFECT] [overlay]
@@ -67,7 +70,7 @@ func main() {
 	var err error
 	switch arg(1) {
 	case "":
-		err = lock(dir)
+		err = lock(dir, nil)
 	case "bg":
 		layer, effect := uint32(layerBack), ""
 		for _, a := range os.Args[2:] {
@@ -95,8 +98,11 @@ func main() {
 		}
 		err = frames(arg(2), os.Args[3:])
 	default:
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
+		if !strings.HasPrefix(arg(1), "-") {
+			fmt.Fprint(os.Stderr, usage)
+			os.Exit(2)
+		}
+		err = lock(dir, os.Args[1:])
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "meltlock:", err)
@@ -104,7 +110,28 @@ func main() {
 	}
 }
 
-func lock(dir string) error {
+// lockerArgs are the locker's options: the shared ones, then the caller's
+// extra ones, which win where they repeat an option. A caller that passes
+// --ready-fd supervises the locker and learns from it when the screen is
+// locked and, when it exits, unlocked, so it must not daemonize.
+func lockerArgs(extra []string) []string {
+	supervised := false
+	for _, a := range extra {
+		if a == "--ready-fd" || strings.HasPrefix(a, "--ready-fd=") || strings.HasPrefix(a, "-R") {
+			supervised = true
+		}
+	}
+	var args []string
+	for _, a := range lockArgs {
+		if a == "--daemonize" && supervised {
+			continue
+		}
+		args = append(args, a)
+	}
+	return append(args, extra...)
+}
+
+func lock(dir string, extra []string) error {
 	for _, name := range []string{"swaylock", "swaylock-plugin"} {
 		if exec.Command("pgrep", "-x", name).Run() == nil {
 			return nil // already locked
@@ -113,11 +140,11 @@ func lock(dir string) error {
 	self, _ := os.Executable()
 	if plugin := findPlugin(self); plugin != "" {
 		capture(dir, true)
-		args := append([]string{"swaylock-plugin"}, lockArgs...)
+		args := append([]string{"swaylock-plugin"}, lockerArgs(extra)...)
 		args = append(args, "--command-each", self+" bg "+chooseEffect())
 		return syscall.Exec(plugin, args, os.Environ())
 	}
-	args := append([]string{"swaylock"}, lockArgs...)
+	args := append([]string{"swaylock"}, lockerArgs(extra)...)
 	for _, image := range capture(dir, false) {
 		args = append(args, "--image", image)
 	}
