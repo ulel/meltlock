@@ -115,12 +115,7 @@ func main() {
 // --ready-fd supervises the locker and learns from it when the screen is
 // locked and, when it exits, unlocked, so it must not daemonize.
 func lockerArgs(extra []string) []string {
-	supervised := false
-	for _, a := range extra {
-		if a == "--ready-fd" || strings.HasPrefix(a, "--ready-fd=") || strings.HasPrefix(a, "-R") {
-			supervised = true
-		}
-	}
+	_, supervised := readyFD(extra)
 	var args []string
 	for _, a := range lockArgs {
 		if a == "--daemonize" && supervised {
@@ -131,11 +126,48 @@ func lockerArgs(extra []string) []string {
 	return append(args, extra...)
 }
 
-func lock(dir string, extra []string) error {
-	for _, name := range []string{"swaylock", "swaylock-plugin"} {
-		if exec.Command("pgrep", "-x", name).Run() == nil {
-			return nil // already locked
+// readyFD finds --ready-fd among the locker options, in the forms swaylock
+// accepts. ok is set whenever the option is there; fd is -1 if its value is
+// not a number.
+func readyFD(extra []string) (fd int, ok bool) {
+	for i, a := range extra {
+		var v string
+		switch {
+		case a == "--ready-fd" || a == "-R":
+			ok = true
+			if i+1 < len(extra) {
+				v = extra[i+1]
+			}
+		case strings.HasPrefix(a, "--ready-fd="):
+			ok, v = true, strings.TrimPrefix(a, "--ready-fd=")
+		case strings.HasPrefix(a, "-R"):
+			ok, v = true, strings.TrimPrefix(a, "-R")
+		default:
+			continue
 		}
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n, true
+		}
+		return -1, true
+	}
+	return -1, ok
+}
+
+func lock(dir string, extra []string) error {
+	if lockers := runningLockers(); len(lockers) > 0 {
+		// Already locked. A supervisor still needs to hear that the screen
+		// is locked, and must not take a quick exit for an unlock, so stand
+		// in for the running locker until it is gone.
+		if fd, _ := readyFD(extra); fd >= 0 {
+			ready := os.NewFile(uintptr(fd), "ready-fd")
+			_, err := ready.WriteString("\n")
+			ready.Close()
+			if err != nil {
+				return err
+			}
+			waitGone(lockers, time.Second)
+		}
+		return nil
 	}
 	self, _ := os.Executable()
 	if plugin := findPlugin(self); plugin != "" {
@@ -153,6 +185,40 @@ func lock(dir string, extra []string) error {
 		return err
 	}
 	return syscall.Exec(path, args, os.Environ())
+}
+
+// locker is a running locker process, by PID and name, so that a reused
+// PID is not mistaken for it.
+type locker struct {
+	pid  int
+	name string
+}
+
+func runningLockers() []locker {
+	var found []locker
+	for _, name := range []string{"swaylock", "swaylock-plugin"} {
+		out, _ := exec.Command("pgrep", "-x", name).Output()
+		for _, f := range strings.Fields(string(out)) {
+			if pid, err := strconv.Atoi(f); err == nil {
+				found = append(found, locker{pid, name})
+			}
+		}
+	}
+	return found
+}
+
+// waitGone returns once none of the lockers runs. The lockers are not our
+// children, so there is nothing to wait on but /proc.
+func waitGone(lockers []locker, every time.Duration) {
+	for _, l := range lockers {
+		for {
+			comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", l.pid))
+			if err != nil || strings.TrimSpace(string(comm)) != l.name {
+				break
+			}
+			time.Sleep(every)
+		}
+	}
 }
 
 // chooseEffect picks the effect for this lock: one of the comma-separated
